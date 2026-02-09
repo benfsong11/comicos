@@ -91,7 +91,7 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           return
         }
 
-        const tolerance = 32
+        const tolerance = 24
         const matchTarget = (idx: number) => {
           return (
             Math.abs(data[idx] - targetR) <= tolerance &&
@@ -121,6 +121,39 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           data[dataIdx + 3] = 255
 
           stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1])
+        }
+
+        // Edge expansion: blend fill color into anti-aliased fringe pixels
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            const idx = y * width + x
+            if (visited[idx]) continue
+
+            // Check if adjacent to a filled pixel
+            const hasFilledNeighbor =
+              (x > 0 && visited[idx - 1]) ||
+              (x < width - 1 && visited[idx + 1]) ||
+              (y > 0 && visited[idx - width]) ||
+              (y < height - 1 && visited[idx + width])
+            if (!hasFilledNeighbor) continue
+
+            // Compute how similar this pixel is to the target (background) color
+            const di = idx * 4
+            const maxDiff = Math.max(
+              Math.abs(data[di] - targetR),
+              Math.abs(data[di + 1] - targetG),
+              Math.abs(data[di + 2] - targetB)
+            )
+            // similarity: 1 = identical to background, 0 = fully stroke
+            const similarity = Math.max(0, 1 - maxDiff / 255)
+            if (similarity <= 0) continue
+
+            // Replace the background portion with fill color
+            data[di] = Math.round(data[di] * (1 - similarity) + fillRgb[0] * similarity)
+            data[di + 1] = Math.round(data[di + 1] * (1 - similarity) + fillRgb[1] * similarity)
+            data[di + 2] = Math.round(data[di + 2] * (1 - similarity) + fillRgb[2] * similarity)
+            data[di + 3] = 255
+          }
         }
 
         ctx.putImageData(imageData, 0, 0)
