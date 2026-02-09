@@ -101,3 +101,48 @@ export const FilePlusIcon = () => (
     <path d="M9 15h6" />
   </svg>
 )
+
+export const EyeIcon = () => (
+  <svg {...svgProps}>
+    <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+)
+
+export const EyeOffIcon = () => (
+  <svg {...svgProps}>
+    <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" />
+    <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
+    <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" />
+    <path d="m2 2 20 20" />
+  </svg>
+)
+
+export const PlusIcon = () => (
+  <svg {...svgProps}>
+    <path d="M5 12h14" />
+    <path d="M12 5v14" />
+  </svg>
+)
+
+export const TrashIcon = () => (
+  <svg {...svgProps}>
+    <path d="M3 6h18" />
+    <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+    <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+  </svg>
+)
+
+export const ArrowUpIcon = () => (
+  <svg {...svgProps}>
+    <path d="m5 12 7-7 7 7" />
+    <path d="M12 19V5" />
+  </svg>
+)
+
+export const ArrowDownIcon = () => (
+  <svg {...svgProps}>
+    <path d="m19 12-7 7-7-7" />
+    <path d="M12 5v14" />
+  </svg>
+)

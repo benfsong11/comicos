@@ -2,6 +2,13 @@ import React, { useRef, useEffect, useCallback, forwardRef, useImperativeHandle 
 
 export type Tool = 'pen' | 'eraser' | 'fill'
 
+export interface Layer {
+  id: string
+  name: string
+  opacity: number
+  visible: boolean
+}
+
 interface CanvasProps {
   width: number
   height: number
@@ -11,6 +18,8 @@ interface CanvasProps {
   pressureEnabled: boolean
   onDraw: () => void
   interactive?: boolean
+  layers: Layer[]
+  activeLayerId: string
 }
 
 export interface CanvasHandle {
@@ -20,50 +29,129 @@ export interface CanvasHandle {
   toDataURL: () => string
   loadImage: (dataUrl: string) => void
   getContext: () => CanvasRenderingContext2D | null
+  getLayerDataURLs: () => Map<string, string>
+  loadLayerImages: (images: Map<string, string>) => void
+  purgeLayerHistory: (layerId: string) => void
+}
+
+interface HistoryEntry {
+  layerId: string
+  imageData: ImageData
 }
 
 const Canvas = forwardRef<CanvasHandle, CanvasProps>(
-  ({ width, height, tool, color, brushSize, pressureEnabled, onDraw, interactive = true }, ref) => {
-    const canvasRef = useRef<HTMLCanvasElement>(null)
+  ({ width, height, tool, color, brushSize, pressureEnabled, onDraw, interactive = true, layers, activeLayerId }, ref) => {
+    const displayCanvasRef = useRef<HTMLCanvasElement>(null)
+    const layerCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map())
     const isDrawing = useRef(false)
     const lastPos = useRef<{ x: number; y: number } | null>(null)
-    const historyRef = useRef<ImageData[]>([])
+    const historyRef = useRef<HistoryEntry[]>([])
     const historyIndexRef = useRef(-1)
     const maxHistory = 50
+    const beforeStateRef = useRef<ImageData | null>(null)
 
-    const getCtx = useCallback(() => {
-      return canvasRef.current?.getContext('2d', { willReadFrequently: true }) ?? null
+    const getDisplayCtx = useCallback(() => {
+      return displayCanvasRef.current?.getContext('2d', { willReadFrequently: true }) ?? null
     }, [])
 
-    const saveState = useCallback(() => {
-      const ctx = getCtx()
+    const getLayerCanvas = useCallback((layerId: string): HTMLCanvasElement | undefined => {
+      return layerCanvasesRef.current.get(layerId)
+    }, [])
+
+    const getLayerCtx = useCallback((layerId: string): CanvasRenderingContext2D | null => {
+      const canvas = getLayerCanvas(layerId)
+      return canvas?.getContext('2d', { willReadFrequently: true }) ?? null
+    }, [getLayerCanvas])
+
+    const getActiveCtx = useCallback((): CanvasRenderingContext2D | null => {
+      return getLayerCtx(activeLayerId)
+    }, [getLayerCtx, activeLayerId])
+
+    // Composite all layers onto the display canvas
+    const composite = useCallback(() => {
+      const displayCtx = getDisplayCtx()
+      if (!displayCtx) return
+
+      // White background
+      displayCtx.globalAlpha = 1
+      displayCtx.globalCompositeOperation = 'source-over'
+      displayCtx.fillStyle = '#ffffff'
+      displayCtx.fillRect(0, 0, width, height)
+
+      // Draw layers bottom to top (layers array is top-first, so iterate in reverse)
+      for (let i = layers.length - 1; i >= 0; i--) {
+        const layer = layers[i]
+        if (!layer.visible) continue
+        const layerCanvas = getLayerCanvas(layer.id)
+        if (!layerCanvas) continue
+        displayCtx.globalAlpha = layer.opacity
+        displayCtx.drawImage(layerCanvas, 0, 0)
+      }
+
+      displayCtx.globalAlpha = 1
+    }, [getDisplayCtx, getLayerCanvas, layers, width, height])
+
+    // Sync offscreen canvases with layers prop
+    useEffect(() => {
+      const map = layerCanvasesRef.current
+      const currentIds = new Set(layers.map((l) => l.id))
+
+      // Remove deleted layers
+      for (const [id] of map) {
+        if (!currentIds.has(id)) {
+          map.delete(id)
+        }
+      }
+
+      // Add new layers
+      for (const layer of layers) {
+        if (!map.has(layer.id)) {
+          const canvas = document.createElement('canvas')
+          canvas.width = width
+          canvas.height = height
+          // New layer starts transparent (cleared)
+          map.set(layer.id, canvas)
+        }
+      }
+
+      composite()
+    }, [layers, width, height, composite])
+
+    // Re-composite whenever layer visibility/opacity changes
+    useEffect(() => {
+      composite()
+    }, [composite])
+
+    // Capture before-state for undo
+    const captureBeforeState = useCallback(() => {
+      const ctx = getActiveCtx()
       if (!ctx) return
-      const imageData = ctx.getImageData(0, 0, width, height)
-      // Remove any redo states
+      beforeStateRef.current = ctx.getImageData(0, 0, width, height)
+    }, [getActiveCtx, width, height])
+
+    // Commit action to history (swap-based)
+    const commitAction = useCallback(() => {
+      if (!beforeStateRef.current) return
+      // Truncate any redo entries
       historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1)
-      historyRef.current.push(imageData)
+      historyRef.current.push({
+        layerId: activeLayerId,
+        imageData: beforeStateRef.current
+      })
       if (historyRef.current.length > maxHistory) {
         historyRef.current.shift()
       } else {
         historyIndexRef.current++
       }
-    }, [getCtx, width, height])
-
-    // Initialize canvas
-    useEffect(() => {
-      const ctx = getCtx()
-      if (!ctx) return
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, width, height)
-      historyRef.current = []
-      historyIndexRef.current = -1
-      saveState()
-    }, [width, height, getCtx, saveState])
+      beforeStateRef.current = null
+    }, [activeLayerId])
 
     const floodFill = useCallback(
       (startX: number, startY: number, fillColor: string) => {
-        const ctx = getCtx()
+        const ctx = getActiveCtx()
         if (!ctx) return
+
+        captureBeforeState()
 
         const imageData = ctx.getImageData(0, 0, width, height)
         const data = imageData.data
@@ -88,6 +176,7 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           targetB === fillRgb[2] &&
           targetA === 255
         ) {
+          beforeStateRef.current = null
           return
         }
 
@@ -145,11 +234,9 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
                 Math.abs(data[di + 1] - targetG),
                 Math.abs(data[di + 2] - targetB)
               )
-              // bgFraction: 1 = fully background, 0 = fully stroke
               const bgFraction = Math.max(0, 1 - maxDiff / 255)
               if (bgFraction <= 0) continue
 
-              // Replace the background portion with fill color
               data[di] = Math.round(Math.min(255, Math.max(0, data[di] + bgFraction * (fillRgb[0] - targetR))))
               data[di + 1] = Math.round(Math.min(255, Math.max(0, data[di + 1] + bgFraction * (fillRgb[1] - targetG))))
               data[di + 2] = Math.round(Math.min(255, Math.max(0, data[di + 2] + bgFraction * (fillRgb[2] - targetB))))
@@ -161,15 +248,16 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         }
 
         ctx.putImageData(imageData, 0, 0)
-        saveState()
+        commitAction()
+        composite()
         onDraw()
       },
-      [getCtx, width, height, saveState, onDraw]
+      [getActiveCtx, width, height, captureBeforeState, commitAction, composite, onDraw]
     )
 
     const getCanvasPos = useCallback(
       (e: React.PointerEvent<HTMLCanvasElement>) => {
-        const canvas = canvasRef.current
+        const canvas = displayCanvasRef.current
         if (!canvas) return { x: 0, y: 0 }
         const rect = canvas.getBoundingClientRect()
         const scaleX = canvas.width / rect.width
@@ -202,7 +290,7 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       (e: React.PointerEvent<HTMLCanvasElement>) => {
         if (e.button !== 0) return
         if (!interactive) return
-        const canvas = canvasRef.current
+        const canvas = displayCanvasRef.current
         if (canvas) {
           canvas.setPointerCapture(e.pointerId)
         }
@@ -214,10 +302,11 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           return
         }
 
+        captureBeforeState()
         isDrawing.current = true
         lastPos.current = pos
 
-        const ctx = getCtx()
+        const ctx = getActiveCtx()
         if (!ctx) return
 
         ctx.lineCap = 'round'
@@ -244,14 +333,16 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         }
         ctx.fill()
         ctx.globalCompositeOperation = prevComposite
+
+        composite()
       },
-      [tool, color, brushSize, pressureEnabled, getCanvasPos, getCtx, floodFill, interactive]
+      [tool, color, brushSize, pressureEnabled, getCanvasPos, getActiveCtx, floodFill, interactive, captureBeforeState, composite]
     )
 
     const handlePointerMove = useCallback(
       (e: React.PointerEvent<HTMLCanvasElement>) => {
         if (!isDrawing.current || !lastPos.current) return
-        const ctx = getCtx()
+        const ctx = getActiveCtx()
         if (!ctx) return
 
         const pressure = pressureEnabled && e.pressure > 0 ? e.pressure : 1
@@ -260,87 +351,161 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         const pos = getCanvasPos(e)
         drawLine(ctx, lastPos.current.x, lastPos.current.y, pos.x, pos.y)
         lastPos.current = pos
+
+        composite()
       },
-      [getCtx, getCanvasPos, drawLine, tool, brushSize, pressureEnabled]
+      [getActiveCtx, getCanvasPos, drawLine, tool, brushSize, pressureEnabled, composite]
     )
 
-    const handlePointerUp = useCallback(() => {
+    const finishStroke = useCallback(() => {
       if (isDrawing.current) {
         isDrawing.current = false
         lastPos.current = null
-        const ctx = getCtx()
+        const ctx = getActiveCtx()
         if (ctx) {
           ctx.globalCompositeOperation = 'source-over'
         }
-        saveState()
+        commitAction()
+        composite()
         onDraw()
       }
-    }, [getCtx, saveState, onDraw])
+    }, [getActiveCtx, commitAction, composite, onDraw])
+
+    const handlePointerUp = useCallback(() => {
+      finishStroke()
+    }, [finishStroke])
 
     // Global pointer up listener
     useEffect(() => {
       const handleGlobalUp = () => {
-        if (isDrawing.current) {
-          isDrawing.current = false
-          lastPos.current = null
-          const ctx = getCtx()
-          if (ctx) {
-            ctx.globalCompositeOperation = 'source-over'
-          }
-          saveState()
-          onDraw()
-        }
+        finishStroke()
       }
       window.addEventListener('pointerup', handleGlobalUp)
       return () => window.removeEventListener('pointerup', handleGlobalUp)
-    }, [getCtx, saveState, onDraw])
+    }, [finishStroke])
 
     useImperativeHandle(
       ref,
       () => ({
         undo: () => {
-          if (historyIndexRef.current <= 0) return
-          historyIndexRef.current--
-          const ctx = getCtx()
+          if (historyIndexRef.current < 0) return
+          const entry = historyRef.current[historyIndexRef.current]
+          const ctx = getLayerCtx(entry.layerId)
           if (!ctx) return
-          ctx.putImageData(historyRef.current[historyIndexRef.current], 0, 0)
+          // Swap: save current state, restore old state
+          const current = ctx.getImageData(0, 0, width, height)
+          ctx.putImageData(entry.imageData, 0, 0)
+          entry.imageData = current
+          historyIndexRef.current--
+          composite()
           onDraw()
         },
         redo: () => {
           if (historyIndexRef.current >= historyRef.current.length - 1) return
           historyIndexRef.current++
-          const ctx = getCtx()
+          const entry = historyRef.current[historyIndexRef.current]
+          const ctx = getLayerCtx(entry.layerId)
           if (!ctx) return
-          ctx.putImageData(historyRef.current[historyIndexRef.current], 0, 0)
+          // Swap: save current state, restore redo state
+          const current = ctx.getImageData(0, 0, width, height)
+          ctx.putImageData(entry.imageData, 0, 0)
+          entry.imageData = current
+          composite()
           onDraw()
         },
         clear: () => {
-          const ctx = getCtx()
+          const ctx = getActiveCtx()
           if (!ctx) return
-          ctx.fillStyle = '#ffffff'
-          ctx.fillRect(0, 0, width, height)
-          saveState()
+          captureBeforeState()
+          ctx.clearRect(0, 0, width, height)
+          commitAction()
+          composite()
           onDraw()
         },
         toDataURL: () => {
-          return canvasRef.current?.toDataURL('image/png') ?? ''
+          composite()
+          return displayCanvasRef.current?.toDataURL('image/png') ?? ''
         },
         loadImage: (dataUrl: string) => {
-          const ctx = getCtx()
+          // v1 compat: load into the first layer
+          const firstLayer = layers[layers.length - 1]
+          if (!firstLayer) return
+          const ctx = getLayerCtx(firstLayer.id)
           if (!ctx) return
           const img = new Image()
           img.onload = () => {
-            ctx.fillStyle = '#ffffff'
-            ctx.fillRect(0, 0, width, height)
+            ctx.clearRect(0, 0, width, height)
             ctx.drawImage(img, 0, 0, width, height)
-            saveState()
+            historyRef.current = []
+            historyIndexRef.current = -1
+            composite()
             onDraw()
           }
           img.src = dataUrl
         },
-        getContext: getCtx
+        getContext: getDisplayCtx,
+        getLayerDataURLs: () => {
+          const result = new Map<string, string>()
+          for (const [id, canvas] of layerCanvasesRef.current) {
+            result.set(id, canvas.toDataURL('image/png'))
+          }
+          return result
+        },
+        loadLayerImages: (images: Map<string, string>) => {
+          let remaining = images.size
+          if (remaining === 0) {
+            historyRef.current = []
+            historyIndexRef.current = -1
+            composite()
+            onDraw()
+            return
+          }
+          for (const [id, dataUrl] of images) {
+            const ctx = getLayerCtx(id)
+            if (!ctx) {
+              remaining--
+              if (remaining === 0) {
+                historyRef.current = []
+                historyIndexRef.current = -1
+                composite()
+                onDraw()
+              }
+              continue
+            }
+            const img = new Image()
+            img.onload = () => {
+              ctx.clearRect(0, 0, width, height)
+              ctx.drawImage(img, 0, 0, width, height)
+              remaining--
+              if (remaining === 0) {
+                historyRef.current = []
+                historyIndexRef.current = -1
+                composite()
+                onDraw()
+              }
+            }
+            img.src = dataUrl
+          }
+        },
+        purgeLayerHistory: (layerId: string) => {
+          // Remove all history entries for a deleted layer, adjusting index
+          const newHistory: HistoryEntry[] = []
+          let removedBefore = 0
+          for (let i = 0; i < historyRef.current.length; i++) {
+            if (historyRef.current[i].layerId === layerId) {
+              if (i <= historyIndexRef.current) removedBefore++
+            } else {
+              newHistory.push(historyRef.current[i])
+            }
+          }
+          historyRef.current = newHistory
+          historyIndexRef.current = Math.min(
+            historyIndexRef.current - removedBefore,
+            newHistory.length - 1
+          )
+        }
       }),
-      [getCtx, width, height, saveState, onDraw]
+      [getLayerCtx, getActiveCtx, getDisplayCtx, width, height, captureBeforeState, commitAction, composite, onDraw, layers]
     )
 
     const cursorStyle = !interactive
@@ -354,7 +519,7 @@ const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     return (
       <div className="canvas-container">
         <canvas
-          ref={canvasRef}
+          ref={displayCanvasRef}
           width={width}
           height={height}
           style={{ cursor: cursorStyle, touchAction: 'none' }}

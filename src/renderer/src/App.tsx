@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
 import Toolbar from './components/Toolbar'
-import Canvas, { type Tool, type CanvasHandle } from './components/Canvas'
+import Canvas, { type Tool, type CanvasHandle, type Layer } from './components/Canvas'
+import LayerPanel from './components/LayerPanel'
 import StatusBar from './components/StatusBar'
 import CanvasSizeModal from './components/CanvasSizeModal'
 
@@ -8,6 +9,19 @@ function getInitialTheme(): 'light' | 'dark' {
   const saved = localStorage.getItem('comicos-theme')
   if (saved === 'light' || saved === 'dark') return saved
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+let layerIdCounter = 0
+function newLayerId(): string {
+  return `layer-${++layerIdCounter}-${Date.now()}`
+}
+
+function createDefaultLayers(): { layers: Layer[]; activeId: string } {
+  const id = newLayerId()
+  return {
+    layers: [{ id, name: '레이어 1', opacity: 1, visible: true }],
+    activeId: id
+  }
 }
 
 const App: React.FC = () => {
@@ -21,6 +35,10 @@ const App: React.FC = () => {
   const [currentFilePath, setCurrentFilePath] = useState<string | null>(null)
   const canvasRef = useRef<CanvasHandle>(null)
   const [, setDrawCount] = useState(0)
+
+  // Layer state
+  const [layers, setLayers] = useState<Layer[]>(() => createDefaultLayers().layers)
+  const [activeLayerId, setActiveLayerId] = useState<string>(() => layers[0]?.id ?? '')
 
   // Pan & zoom-drag state
   const [spaceHeld, setSpaceHeld] = useState(false)
@@ -72,6 +90,9 @@ const App: React.FC = () => {
   const handleClear = useCallback(() => canvasRef.current?.clear(), [])
 
   const handleNew = useCallback(() => {
+    const { layers: newLayers, activeId } = createDefaultLayers()
+    setLayers(newLayers)
+    setActiveLayerId(activeId)
     setCanvasSize(null)
     setCurrentFilePath(null)
     setPanOffset({ x: 0, y: 0 })
@@ -82,21 +103,83 @@ const App: React.FC = () => {
     setCanvasSize({ width, height })
   }, [])
 
-  // Build .cmc project JSON from current state
+  // --- Layer callbacks ---
+  const handleAddLayer = useCallback(() => {
+    const id = newLayerId()
+    const count = layers.length + 1
+    setLayers((prev) => [{ id, name: `레이어 ${count}`, opacity: 1, visible: true }, ...prev])
+    setActiveLayerId(id)
+  }, [layers.length])
+
+  const handleDeleteLayer = useCallback(
+    (id: string) => {
+      if (layers.length <= 1) return
+      canvasRef.current?.purgeLayerHistory(id)
+      setLayers((prev) => prev.filter((l) => l.id !== id))
+      if (activeLayerId === id) {
+        const remaining = layers.filter((l) => l.id !== id)
+        setActiveLayerId(remaining[0]?.id ?? '')
+      }
+    },
+    [layers, activeLayerId]
+  )
+
+  const handleMoveLayer = useCallback((id: string, direction: 'up' | 'down') => {
+    setLayers((prev) => {
+      const idx = prev.findIndex((l) => l.id === id)
+      if (idx < 0) return prev
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev
+      const copy = [...prev]
+      ;[copy[idx], copy[targetIdx]] = [copy[targetIdx], copy[idx]]
+      return copy
+    })
+  }, [])
+
+  const handleToggleVisibility = useCallback((id: string) => {
+    setLayers((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, visible: !l.visible } : l))
+    )
+  }, [])
+
+  const handleSetOpacity = useCallback((id: string, opacity: number) => {
+    setLayers((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, opacity } : l))
+    )
+  }, [])
+
+  const handleRenameLayer = useCallback((id: string, name: string) => {
+    setLayers((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, name } : l))
+    )
+  }, [])
+
+  const handleSelectLayer = useCallback((id: string) => {
+    setActiveLayerId(id)
+  }, [])
+
+  // Build .cmc project JSON from current state (v2)
   const buildProjectData = useCallback(() => {
     if (!canvasRef.current || !canvasSize) return null
+    const layerImages: Record<string, string> = {}
+    const dataURLs = canvasRef.current.getLayerDataURLs()
+    for (const [id, dataUrl] of dataURLs) {
+      layerImages[id] = dataUrl
+    }
     const project = {
-      version: 1,
+      version: 2,
       canvasWidth: canvasSize.width,
       canvasHeight: canvasSize.height,
       tool,
       brushSize,
       pressureEnabled,
       color,
-      imageData: canvasRef.current.toDataURL()
+      layers,
+      activeLayerId,
+      layerImages
     }
     return JSON.stringify(project, null, 2)
-  }, [canvasSize, tool, brushSize, pressureEnabled, color])
+  }, [canvasSize, tool, brushSize, pressureEnabled, color, layers, activeLayerId])
 
   const handleSave = useCallback(async () => {
     const data = buildProjectData()
@@ -135,12 +218,33 @@ const App: React.FC = () => {
         setCurrentFilePath(result.filePath)
         setPanOffset({ x: 0, y: 0 })
         setZoom(1)
-        // Load image after canvas has resized
-        setTimeout(() => {
-          if (project.imageData) {
-            canvasRef.current?.loadImage(project.imageData)
-          }
-        }, 50)
+
+        if (project.version === 2 && project.layers) {
+          // v2 format
+          const loadedLayers: Layer[] = project.layers
+          setLayers(loadedLayers)
+          setActiveLayerId(project.activeLayerId ?? loadedLayers[0]?.id ?? '')
+          // Load layer images after canvas and layers are ready
+          setTimeout(() => {
+            if (project.layerImages) {
+              const imageMap = new Map<string, string>()
+              for (const [id, dataUrl] of Object.entries(project.layerImages)) {
+                imageMap.set(id, dataUrl as string)
+              }
+              canvasRef.current?.loadLayerImages(imageMap)
+            }
+          }, 100)
+        } else {
+          // v1 format: single layer
+          const { layers: newLayers, activeId } = createDefaultLayers()
+          setLayers(newLayers)
+          setActiveLayerId(activeId)
+          setTimeout(() => {
+            if (project.imageData) {
+              canvasRef.current?.loadImage(project.imageData)
+            }
+          }, 100)
+        }
       } catch {
         // Invalid project file
       }
@@ -423,32 +527,47 @@ const App: React.FC = () => {
         theme={theme}
         toggleTheme={toggleTheme}
       />
-      <div
-        ref={canvasAreaRef}
-        className="canvas-area"
-        style={areaCursor ? { cursor: areaCursor } : undefined}
-        onPointerDown={handleAreaPointerDown}
-        onPointerMove={handleAreaPointerMove}
-        onPointerUp={handleAreaPointerUp}
-      >
+      <div className="main-content">
         <div
-          style={{
-            transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`,
-            transformOrigin: 'center center'
-          }}
+          ref={canvasAreaRef}
+          className="canvas-area"
+          style={areaCursor ? { cursor: areaCursor } : undefined}
+          onPointerDown={handleAreaPointerDown}
+          onPointerMove={handleAreaPointerMove}
+          onPointerUp={handleAreaPointerUp}
         >
-          <Canvas
-            ref={canvasRef}
-            width={canvasSize.width}
-            height={canvasSize.height}
-            tool={tool}
-            color={color}
-            brushSize={brushSize}
-            pressureEnabled={pressureEnabled}
-            onDraw={handleDraw}
-            interactive={!spaceHeld}
-          />
+          <div
+            style={{
+              transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`,
+              transformOrigin: 'center center'
+            }}
+          >
+            <Canvas
+              ref={canvasRef}
+              width={canvasSize.width}
+              height={canvasSize.height}
+              tool={tool}
+              color={color}
+              brushSize={brushSize}
+              pressureEnabled={pressureEnabled}
+              onDraw={handleDraw}
+              interactive={!spaceHeld}
+              layers={layers}
+              activeLayerId={activeLayerId}
+            />
+          </div>
         </div>
+        <LayerPanel
+          layers={layers}
+          activeLayerId={activeLayerId}
+          onAddLayer={handleAddLayer}
+          onDeleteLayer={handleDeleteLayer}
+          onMoveLayer={handleMoveLayer}
+          onToggleVisibility={handleToggleVisibility}
+          onSetOpacity={handleSetOpacity}
+          onRenameLayer={handleRenameLayer}
+          onSelectLayer={handleSelectLayer}
+        />
       </div>
       <StatusBar
         canvasWidth={canvasSize.width}
