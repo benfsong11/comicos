@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(cmake:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(export PATH=\"/c/Qt/Tools/mingw1310_64/bin:/c/Qt/Tools/Ninja:/c/Qt/Tools/CMake_64/bin:$PATH\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(start comicos.exe)",
+      "Bash(\"C:\\\\Users\\\\benfs\\\\source\\\\repos\\\\comicos\\\\build\\\\comicos.exe\")",
+      "Bash(git push:*)"
+    ]
+  }
+}
